@@ -10,7 +10,12 @@ uv sync --extra cpu
 uv sync --extra cuda
 ```
 
-Download the pretrained models (from the root):
+Download the pretrained models (from root):
 ```shell
 ./chess_fen_lib/download_models.sh
+```
+
+To run the script:
+```shell
+uv run python main.py <PATH/TO/INPUT.pdf> -n <WORKSHEET_NAME>
 ```
