@@ -15,6 +15,16 @@ Download the pretrained models (from root):
 ./chess_fen_lib/download_models.sh
 ```
 
+Run playwright install:
+```shell
+uv run playwright install chromium
+```
+
+Download Cairo (macos):
+```shell
+brew install cairo
+```
+
 To run the script:
 ```shell
 uv run python main.py <PATH/TO/INPUT.pdf> -n <WORKSHEET_NAME>
