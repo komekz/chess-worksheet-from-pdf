@@ -42,7 +42,9 @@ def main():
         raise ValueError(f"{RED}excepts a .pdf file, received: {PDF_PATH.suffix}{RESET}")
     PUZZLE_NAME = args.name
     START_PAGE_NUM = args.start_page
-    
+
+    RESULT_DIR = Path('result')
+
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, START_PAGE_NUM) as chessPDF:
 
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
@@ -63,10 +65,11 @@ def main():
             if len(FENs) != 6:
                 continue
 
+            pdf_file_name = RESULT_DIR / f'result/{PUZZLE_NAME}-{page_num}.pdf'
             create_worksheet_pdf(
                 json.dumps(FENs), 
                 page_num, 
-                f'result/{PUZZLE_NAME}-{page_num}.pdf')
+                str(pdf_file_name))
 
         # plt.show()
 
