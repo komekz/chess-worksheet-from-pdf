@@ -14,3 +14,6 @@ wheels/
 
 test_imgs/
 test.py
+
+# large files
+chess_fen_lib/models/
