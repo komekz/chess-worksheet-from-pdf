@@ -1,0 +1,51 @@
+[project]
+name = "chess-worksheet-from-pdf"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "<3.12, >=3.11"
+dependencies = [
+    "torch>=2.13.0",
+    "torchvision>=0.28.0",
+    "Pillow",
+    "numpy",
+    "matplotlib",
+    "scikit-image",
+    "tqdm",
+    "pyffish",
+    "cairosvg",
+    "pyfastnoiselite",
+    "gdown",
+    "opencv-python>=4.13.0.92",
+    "chess>=1.11.2",
+    "playwright>=1.61.0",
+    "pymupdf>=1.28.0",
+]
+
+[project.optional-dependencies]
+# PyTorch backend — pick exactly one when running uv sync:
+#   uv sync --extra cpu     → CPU (works everywhere, no GPU required)
+#   uv sync --extra cuda    → CUDA 12.8  (NVIDIA GPUs)
+#   uv sync --extra rocm    → ROCm 6.4   (AMD GPUs, Linux only)
+cpu  = ["torch", "torchvision"]
+cuda = ["torch", "torchvision"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu",  extra = "cpu" },
+    { index = "pytorch-cuda",  extra = "cuda" }
+]
+torchvision = [
+    { index = "pytorch-cpu",  extra = "cpu" },
+    { index = "pytorch-cuda",  extra = "cuda" }
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

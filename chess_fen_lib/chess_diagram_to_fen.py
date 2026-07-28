@@ -1,0 +1,530 @@
+import argparse
+import os
+import random
+from dataclasses import dataclass
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import torch
+from PIL import Image, ImageOps
+from torchvision.transforms import functional
+
+import src.board_image_rotation.dataset as rotation_dataset
+import src.fen_recognition.dataset as fen_dataset
+from src import common, consts
+from src.board_image_rotation.model import ImageRotation
+from src.board_orientation.model import OrientationModel
+from src.bounding_box.inference import get_quad
+from src.bounding_box.model import BoardQuad
+from src.existence.model import BoardExistence
+from src.fen_recognition.model import BoardRec
+from src.games import GAMES, get_game
+
+device = torch.device("cpu")
+
+
+class SomeModel:
+    def __init__(self, model_class: type, default_path=None, name: str = "") -> None:
+        self.model = None
+        self.model_path = default_path
+        self.model_class = model_class
+        self.name = name
+
+    def get(self):
+        if self.model is None:
+            if self.model_path is None:
+                desc = f" '{self.name}'" if self.name else ""
+                raise FileNotFoundError(
+                    f"No model file found{desc}. "
+                    f"Make sure a trained .pth file exists in the expected directory, "
+                    f"or pass an explicit path via set_model_path()."
+                )
+
+            self.model = self.model_class()
+            self.model.load_state_dict(
+                torch.load(
+                    self.model_path,
+                    map_location=torch.device("cpu"),
+                )
+            )
+            self.model.to(device)
+        self.model.eval()
+        return self.model
+
+    def set_model_path(self, model_path: str):
+        self.model = None
+        self.model_path = model_path
+
+
+script_dir = os.path.abspath(os.path.dirname(__file__))
+
+
+def _find_latest_model(game: str, *patterns: str) -> str | None:
+    model_dir = Path(script_dir) / "models" / game
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(model_dir.glob(pattern))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
+
+@dataclass
+class _GameModels:
+    existence: SomeModel
+    bbox: SomeModel
+    image_rotation: SomeModel
+    fen: SomeModel
+    orientation: SomeModel
+
+
+_models_cache: dict[str, _GameModels] = {}
+
+
+def _get_models(game: str) -> _GameModels:
+    if game not in _models_cache:
+        model_dir = f"models/{game}/"
+        _models_cache[game] = _GameModels(
+            existence=SomeModel(
+                BoardExistence,
+                _find_latest_model(game, "best_model_existence_*.pth"),
+                name=f"{model_dir}best_model_existence_*.pth",
+            ),
+            bbox=SomeModel(
+                BoardQuad,
+                _find_latest_model(game, "best_model_quad_*.pth"),
+                name=f"{model_dir}best_model_quad_*.pth",
+            ),
+            image_rotation=SomeModel(
+                ImageRotation,
+                _find_latest_model(game, "best_model_image_rotation_*.pth"),
+                name=f"{model_dir}best_model_image_rotation_*.pth",
+            ),
+            fen=SomeModel(
+                lambda g=game: BoardRec(game=g),
+                _find_latest_model(
+                    game, "best_model_position_*.pth", "best_model_fen_*.pth"
+                ),
+                name=f"{model_dir}best_model_position_*.pth",
+            ),
+            orientation=SomeModel(
+                lambda g=game: OrientationModel(game=g),
+                _find_latest_model(game, "best_model_orientation_*.pth"),
+                name=f"{model_dir}best_model_orientation_*.pth",
+            ),
+        )
+    return _models_cache[game]
+
+
+@torch.no_grad()
+def check_for_board_existence(img: Image.Image, game: str) -> bool:
+
+    img_tensor = common.to_rgb_tensor(img)
+    img_tensor = functional.resize(
+        img_tensor, [consts.BBOX_IMAGE_SIZE, consts.BBOX_IMAGE_SIZE]
+    )
+    img_tensor = img_tensor.to(device)
+    img_tensor = common.MinMaxMeanNormalization()(img_tensor)
+
+    output = _get_models(game).existence.get()(img_tensor.unsqueeze(0)).squeeze(0)
+
+    return output.cpu().item() > 0.5
+
+
+def _perspective_warp(
+    img: Image.Image, corners_px: torch.Tensor, output_size: int
+) -> Image.Image:
+    """Warp img so that the quad defined by corners_px maps to a square.
+
+    corners_px: [4, 2] tensor of (x, y) pixel coords in img space.
+    Corner order: TL, TR, BR, BL.
+    """
+    import numpy as np
+    from skimage.transform import ProjectiveTransform
+
+    dst = np.array(
+        [(0, 0), (output_size, 0), (output_size, output_size), (0, output_size)],
+        dtype=np.float64,
+    )
+    src = np.array(corners_px.tolist(), dtype=np.float64)
+
+    t = ProjectiveTransform.from_estimate(dst, src)
+
+    coeffs = t.params.flatten()[:8]
+    warped = img.transform(
+        (output_size, output_size),
+        Image.PERSPECTIVE,
+        coeffs.tolist(),
+        Image.BICUBIC,
+    )
+    return warped
+
+
+@dataclass
+class WarpResult:
+    image: Image.Image = None
+    mask: torch.Tensor = None
+    corners: torch.Tensor = None  # [4, 2] in BBOX_IMAGE_SIZE space
+
+
+@torch.no_grad()
+def warp_to_board(img: Image.Image, game: str, max_num_tries=10) -> WarpResult:
+    pad_factor = 0.05
+    pad_x = img.width * pad_factor
+    pad_y = img.height * pad_factor
+
+    img = common.pad(img, pad_x, pad_y)
+
+    bbox_model = _get_models(game).bbox
+
+    for i in range(0, max_num_tries):
+        if img.width == 0 or img.height == 0:
+            return WarpResult()
+
+        img_tensor = common.to_rgb_tensor(img).float()
+        img_tensor = functional.resize(
+            img_tensor, [consts.BBOX_IMAGE_SIZE, consts.BBOX_IMAGE_SIZE]
+        )
+        mn, mx = img_tensor.min(), img_tensor.max()
+        if mx > mn:
+            img_tensor = (img_tensor - mn) / (mx - mn)
+        else:
+            img_tensor = torch.zeros_like(img_tensor)
+
+        corners, mask = get_quad(bbox_model.get(), img_tensor)
+        if corners is None:
+            return WarpResult(mask=mask, corners=corners)
+
+        # Scale corners from BBOX_IMAGE_SIZE space to original image space
+        x_factor = img.width / consts.BBOX_IMAGE_SIZE
+        y_factor = img.height / consts.BBOX_IMAGE_SIZE
+        corners_px = corners.clone()
+        corners_px[:, 0] *= x_factor
+        corners_px[:, 1] *= y_factor
+
+        # Compute bounding box of quad
+        xs = corners_px[:, 0]
+        ys = corners_px[:, 1]
+        x1, x2 = xs.min().item(), xs.max().item()
+        y1, y2 = ys.min().item(), ys.max().item()
+        quad_w = x2 - x1
+        quad_h = y2 - y1
+
+        # Accept if quad is big relative to image
+        if quad_w / img.width > 0.7 and quad_h / img.height > 0.7:
+            # Compute output size from average side lengths
+            side_lengths = []
+            for j in range(4):
+                p1 = corners_px[j]
+                p2 = corners_px[(j + 1) % 4]
+                side_lengths.append((p2 - p1).norm().item())
+            avg_side = sum(side_lengths) / len(side_lengths)
+            output_size = max(32, int(avg_side))
+
+            warped = _perspective_warp(img, corners_px, output_size)
+            return WarpResult(image=warped, mask=mask, corners=corners)
+
+        # Crop closer to the quad and retry
+        x_addition = quad_w * 0.1
+        y_addition = quad_h * 0.1
+        crop_x1 = int(max(x1 - x_addition, 0))
+        crop_y1 = int(max(y1 - y_addition, 0))
+        crop_x2 = int(min(x2 + x_addition, img.width))
+        crop_y2 = int(min(y2 + y_addition, img.height))
+
+        img = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+    return WarpResult()
+
+
+@torch.no_grad()
+def board_image_rotation(img: Image.Image, game: str) -> int:
+    input_img = common.to_rgb_tensor(img)
+    input_img = rotation_dataset.default_transforms(input_img).to(device)
+    pred = (
+        _get_models(game)
+        .image_rotation.get()(input_img.unsqueeze(0))
+        .cpu()
+        .squeeze(0)
+        .argmax()
+        .item()
+    )
+    return pred
+
+
+@torch.no_grad()
+def is_board_flipped(board: common.Position, game: str, no_rotate_bias=None) -> bool:
+
+    if no_rotate_bias is None:
+        if game == "xiangqi":
+            # xiangqi orientation classification is almost perfect
+            no_rotate_bias = 0.45
+        else:
+            no_rotate_bias = 0.2
+
+    board_tensor = common.position_to_tensor(board)
+    output = (
+        _get_models(game)
+        .orientation.get()(board_tensor.unsqueeze(0).to(device))
+        .squeeze(0)
+        .cpu()
+    )
+
+    return output.item() - no_rotate_bias > 0.5
+
+
+@torch.no_grad()
+def rotate_board(board: common.Position, game: str) -> common.Position:
+    spec = get_game(game)
+    board_tensor = common.position_to_tensor(board)
+    board_tensor = common.rotate_tensor_180(board_tensor, spec)
+    return common.tensor_to_position(board_tensor, spec)
+
+
+@torch.no_grad()
+def get_board_from_cropped_img(img: Image.Image, game: str) -> common.Position:
+    spec = get_game(game)
+    models = _get_models(game)
+    position_transforms = fen_dataset.get_default_transforms(game)
+
+    MIN_SIZE = 32
+    if img.width < MIN_SIZE or img.height < MIN_SIZE:
+        return None
+
+    img = common.to_rgb_tensor(img).to(device)
+    input = position_transforms(img)
+
+    if input.isnan().any():
+        return None
+
+    output = models.fen.get()(input.unsqueeze(0)).squeeze(0)
+    output = output.clamp(0, 1)
+
+    board = common.tensor_to_position(output.cpu(), spec)
+    if board.occupied == 0:
+        return None
+    return board
+
+
+@dataclass
+class FenResult:
+    fen: str = None
+    notation: str = None
+    game: str = None
+    cropped_image: Image.Image = None
+    bbox_mask: torch.Tensor = None
+    bbox_corners: torch.Tensor = None  # [4, 2] in BBOX_IMAGE_SIZE space
+    image_rotation_angle: int = None
+    board_is_flipped: bool = None
+
+
+def get_supported_games() -> list[str]:
+    return list(GAMES.keys())
+
+
+def get_fen(
+    img: Image.Image,
+    game: str,
+    auto_rotate_image=True,
+    mirror_when_180_rotation=False,
+    auto_rotate_board=True,
+):
+    """Takes an image and returns an FEN (Forsyth-Edwards Notation) string.
+
+    Args:
+        - `img (PIL.Image.Image)`: The image of a chess diagram.
+        - `game (str)`: The game key (e.g. 'chess'). See get_supported_games().
+        - `auto_rotate_image (bool)`: If this is set to `True`, this function will try to guess if the image is rotated 0°, 90°, 180°,
+        or 270° and rotate the image accordingly.
+        - `mirror_when_180_rotation (bool)`: If this  and `auto_rotate_image` is set to `True`, this function will also mirror the image
+        (left to right) if it was rotated 180°.
+        - `auto_rotate_board (bool)`: If this is set to `True`, this function will try to guess if the diagram is from whites or blacks
+        perspective and rotate the board accordingly.
+
+    Returns:
+        - `FenResult | None`: Returns a dataclass that contains the fields `fen`, `notation`, `game`, `cropped_image`, `image_rotation_angle`, and `board_is_flipped`.
+        Returns `None` if there is no board detectable.
+    """
+    spec = get_game(game)
+
+    img = img.convert("RGB")
+
+    if not check_for_board_existence(img, spec.key):
+        return None
+
+    result = FenResult()
+
+    warp = warp_to_board(img, spec.key)
+    result.bbox_mask = warp.mask
+    result.bbox_corners = warp.corners
+    if warp.image is None:
+        return result
+
+    # Detect rotation on the warped board crop
+    result.image_rotation_angle = board_image_rotation(warp.image, spec.key)
+
+    if auto_rotate_image:
+        cropped = warp.image.rotate(
+            -rotation_dataset.ROTATIONS[result.image_rotation_angle], expand=True
+        )
+
+        if (
+            mirror_when_180_rotation
+            and rotation_dataset.ROTATIONS[result.image_rotation_angle] == 180
+        ):
+            cropped = ImageOps.mirror(cropped)
+    else:
+        cropped = warp.image
+
+    result.cropped_image = cropped
+    board = get_board_from_cropped_img(result.cropped_image, spec.key)
+
+    if board is not None:
+        result.board_is_flipped = is_board_flipped(board, spec.key)
+
+        if auto_rotate_board and result.board_is_flipped:
+            board = rotate_board(board, spec.key)
+
+        result.fen = board.fen()
+        result.notation = result.fen
+        result.game = spec.key
+
+    return result
+
+
+def demo(root_dir: str, shuffle_files: bool, game: str, show_bbox: bool = False):
+    spec = get_game(game)
+
+    if device.type == "cuda":
+        print("Using GPU:", torch.cuda.get_device_name())
+    else:
+        print("Using CPU")
+
+    torch.set_printoptions(precision=1, sci_mode=False)
+
+    path = Path(root_dir)
+    if path.is_dir():
+        file_names = common.glob_all_image_files_recursively(path)
+    else:
+        file_names = [path]
+
+    if shuffle_files:
+        random.shuffle(file_names)
+
+    for file_name in file_names:
+        print(file_name)
+
+        img = Image.open(file_name).convert("RGB")
+
+        img = img.rotate(random.choice(rotation_dataset.ROTATIONS), expand=True)
+
+        fen_result = get_fen(img, game=game)
+
+        if fen_result is None:
+            print("Couldn't detect board:", file_name)
+        elif fen_result.fen is None:
+            print("Couldn't detect FEN:", file_name)
+        else:
+            print(fen_result.fen)
+
+        true_fen = common.normalize_position_notation(Path(file_name).stem, spec)
+        if true_fen is None:
+            print(f"WARNING: Couldn't find ground truth FEN")
+        else:
+            if (
+                fen_result is not None
+                and fen_result.fen is not None
+                and fen_result.fen.split()[0] == true_fen.split()[0]
+            ):
+                print("Correct")
+            else:
+                print(true_fen)
+                print("WRONG")
+
+        if show_bbox:
+            fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(20, 8))
+        else:
+            fig, (ax1, ax3, ax4) = plt.subplots(1, 3, figsize=(15, 8))
+            ax2 = None
+
+        ax1.imshow(img)
+        if fen_result is not None:
+            if show_bbox and ax2 is not None:
+                if fen_result.bbox_mask is not None:
+                    ax2.imshow(
+                        fen_result.bbox_mask.numpy(), cmap="gray", vmin=0, vmax=1
+                    )
+                if fen_result.bbox_corners is not None:
+                    from matplotlib.patches import Polygon as MplPolygon
+
+                    quad_xy = fen_result.bbox_corners.numpy()
+                    patch = MplPolygon(
+                        quad_xy, closed=True, fill=False, edgecolor="red", linewidth=2
+                    )
+                    ax2.add_patch(patch)
+            if fen_result.cropped_image is not None:
+                ax3.imshow(fen_result.cropped_image)
+            if fen_result.fen is not None:
+                pos = common.position_from_notation(fen_result.fen, spec)
+                if pos is not None:
+                    fen_img = common.get_image(pos, width=512, height=512)
+                    ax4.imshow(fen_img)
+
+        ax1.axis("off")
+        if ax2 is not None:
+            ax2.axis("off")
+            ax2.title.set_text("BBox mask")
+        ax3.axis("off")
+        ax4.axis("off")
+        ax1.title.set_text("Original image")
+        ax3.title.set_text("Cropped to board")
+        ax4.title.set_text("Recognized board")
+        plt.show()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="TODO")
+    parser.add_argument(
+        "--dir",
+        type=str,
+        required=True,
+        help="directory that contains diagram images",
+    )
+    parser.add_argument(
+        "--bbox_model",
+        type=str,
+        default=None,
+        help="path to bbox model parameters",
+    )
+    parser.add_argument(
+        "--fen_model",
+        type=str,
+        default=None,
+        help="path to fen model parameters",
+    )
+    parser.add_argument(
+        "--orientation_model",
+        type=str,
+        default=None,
+        help="path to orientation_model model parameters",
+    )
+    parser.add_argument("--shuffle_files", action="store_true")
+    parser.add_argument("--show_bbox", action="store_true")
+    parser.add_argument("--game", type=str, required=True)
+    args = parser.parse_args()
+
+    models = _get_models(args.game)
+    if args.bbox_model is not None:
+        models.bbox.set_model_path(args.bbox_model)
+    if args.fen_model is not None:
+        models.fen.set_model_path(args.fen_model)
+    if args.orientation_model is not None:
+        models.orientation.set_model_path(args.orientation_model)
+
+    demo(
+        root_dir=args.dir,
+        shuffle_files=args.shuffle_files,
+        game=args.game,
+        show_bbox=args.show_bbox,
+    )
