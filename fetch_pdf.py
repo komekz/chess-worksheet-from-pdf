@@ -29,5 +29,3 @@ def create_worksheet_pdf(fen_json: str, page_num: int, output_filepath: str):
         
         # 6. Cleanup
         browser.close()
-        tqdm.write(f"Successfully generated: {output_filepath}")
-

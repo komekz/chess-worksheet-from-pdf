@@ -1,4 +1,3 @@
-import os
 import sys
 import matplotlib.pyplot as plt
 import cv2
@@ -8,25 +7,43 @@ import chess.svg
 from cairosvg import svg2png
 import json
 from tqdm import tqdm
+from pathlib import Path
+import argparse
 
 from fetch_pdf import create_worksheet_pdf
 from chess_pdf import ChessPDF
 
 # For the chess lib to import properly
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LIB_DIR = os.path.join(ROOT_DIR, "chess_fen_lib")
-sys.path.insert(0, LIB_DIR)
+ROOT_DIR = Path(__file__).parent.resolve()
+LIB_DIR = ROOT_DIR / "chess_fen_lib"
+sys.path.insert(0, str(LIB_DIR))
 
 from chess_fen_lib.chess_diagram_to_fen import get_fen
 from PIL import Image
 
+RED = "\033[31m"
+RESET = "\033[0m"
+
+parser = argparse.ArgumentParser(description='''
+    Turns multi page unstructured pdfs into individual worksheets
+''')
+parser.add_argument("input_pdf", help="the PDF to turn into worksheets")
+parser.add_argument("--name", "-n", required=True, help="name of the output worksheets")
+parser.add_argument("--start-page", "-s", default=0, type=int, help="First page that contains puzzles (used for correct page numbering)")
+
+args = parser.parse_args()
+
 def main():
 
-    PDF_PATH = '/Users/james/Downloads/book1.pdf'
-    PUZZLE_NAME = 'book-1'
-
-
-    with ChessPDF(PDF_PATH, PUZZLE_NAME, 4) as chessPDF:
+    PDF_PATH = Path(args.input_pdf)
+    if not PDF_PATH.is_file():
+        raise FileNotFoundError(f'This file does not exist: {PDF_PATH}')
+    if PDF_PATH.suffix != '.pdf':
+        raise ValueError(f"{RED}excepts a .pdf file, received: {PDF_PATH.suffix}{RESET}")
+    PUZZLE_NAME = args.name
+    START_PAGE_NUM = args.start_page
+    
+    with ChessPDF(str(PDF_PATH), PUZZLE_NAME, START_PAGE_NUM) as chessPDF:
 
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
             recContours = getRectangleContours(png)
@@ -49,7 +66,7 @@ def main():
             create_worksheet_pdf(
                 json.dumps(FENs), 
                 page_num, 
-                f'test_imgs/{PUZZLE_NAME}-{page_num}.pdf')
+                f'result/{PUZZLE_NAME}-{page_num}.pdf')
 
         # plt.show()
 

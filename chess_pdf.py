@@ -41,7 +41,6 @@ class ChessPDF:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.doc.close()
-        print("pdf closed via context manager")
 
 
 
