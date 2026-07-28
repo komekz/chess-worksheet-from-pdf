@@ -14,7 +14,7 @@ def create_worksheet_pdf(fen_json: str, page_num: int, output_filepath: str):
             "fen": fen_json, 
             "pageNum": page_num
         })
-        react_url = f"http://localhost:5173/?{encoded_params}"
+        react_url = f"https://chessworksheets.me/?{encoded_params}"
 
         # 3. Load the page
         page.goto(react_url)
