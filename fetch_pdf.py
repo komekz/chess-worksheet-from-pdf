@@ -1,5 +1,5 @@
 import urllib.parse
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from tqdm import tqdm
 
 def create_worksheet_pdf(fen_json: str, page_num: int, output_filepath: str):
