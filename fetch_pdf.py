@@ -16,16 +16,20 @@ def create_worksheet_pdf(fen_json: str, page_num: int, output_filepath: str):
         })
         react_url = f"https://chessworksheets.me/?{encoded_params}"
 
-        # 3. Load the page
-        page.goto(react_url)
-        
-        # 4. Wait for React to finish rendering
-        page.wait_for_selector(".chessboards")
-        
-        # 5. Trigger the headless "window.print()" and save directly to disk
-        page.pdf(
-            path=output_filepath
-        )
-        
-        # 6. Cleanup
-        browser.close()
+        try:
+            page.goto(react_url)
+            
+            # 4. Wait for React to finish rendering
+            page.wait_for_selector(".chessboards", timeout=30000)
+            
+            # 5. Trigger the headless "window.print()" and save directly to disk
+            page.pdf(path=output_filepath)
+            
+        except PlaywrightTimeoutError:
+            print(f"\n[ERROR] Playwright timed out on page {page_num}.")
+            print(f"Failed URL: {react_url}")
+            print("Skipping this page and continuing...\n")
+            
+        finally:
+            # 6. Cleanup (Ensure the browser always closes, even on failure)
+            browser.close()
