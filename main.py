@@ -49,8 +49,6 @@ def main():
 
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, EMPTY_PAGES) as chessPDF:
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
-            png.save('omgblack.png')
-
             recContours = getRectangleContours(png)
             cutPuzzles = cropPuzzles(recContours, png)
 
@@ -63,7 +61,6 @@ def main():
                     fen = result.fen
                     FENs.append(fen)
                     actualPuzzles.append(puzzle)
-                    puzzle["img"].save("test.png")
 
                     # chessBoardVis(fen, puzzle)
 
