@@ -27,5 +27,5 @@ brew install cairo
 
 To run the script:
 ```shell
-uv run python main.py <PATH/TO/INPUT.pdf> -n <WORKSHEET_NAME>
+uv run python main.py <PATH/TO/INPUT.pdf> -n <WORKSHEET_NAME> -e <NUMBER_OF_EMPTY_PAGES_AT_START_OF_PDF>
 ```
