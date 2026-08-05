@@ -57,7 +57,7 @@ def main():
             for puzzle in cutPuzzles:
                 result = get_fen(puzzle["img"], "chess")
 
-                if result:
+                if result and result.fen:
                     fen = result.fen
                     FENs.append(fen)
                     actualPuzzles.append(puzzle)
@@ -75,6 +75,7 @@ def main():
                 nextX = actualPuzzles[i+1]["x"]
                 if (curX > nextX):
                     FENs[i], FENs[i+1] = FENs[i+1], FENs[i]
+                    actualPuzzles[i], actualPuzzles[i+1] = actualPuzzles[i+1], actualPuzzles[i]
                 i += 2
 
             # Set side to play based on indicator
