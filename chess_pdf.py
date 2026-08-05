@@ -11,7 +11,7 @@ class ChessPDF:
                 ) -> None:
         self.doc = pymupdf.open(pdf_path)
         self.current_page_num = start_page
-        self.total_pages = self.doc.page_count
+        self.total_pages = self.doc.page_count - start_page
         self.start_page_num = start_page
         self.puzzle_name = puzzle_name
 
