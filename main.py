@@ -52,7 +52,7 @@ def main():
 
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, EMPTY_PAGES) as chessPDF:
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
-            recContours = getRectangleContours(png)
+            recContours = getSquareContours(png)
             cutPuzzles = cropPuzzles(recContours, png)
 
             FENs = []
@@ -171,7 +171,7 @@ def cropPuzzles(recContours, pillowImg) -> list:
         max_w, max_h = pillowImg.size
 
         # Give each crop edge some offset, capped at the image borders
-        clearance = 20
+        clearance = 25
         left = max(0, np.min(contour[:,:, 0]) - clearance)
         right = min(max_w, np.max(contour[:,:, 0]) + clearance)
         top = max(0, np.min(contour[:,:, 1]) - clearance)
@@ -189,7 +189,8 @@ def cropPuzzles(recContours, pillowImg) -> list:
 
     return cutPuzzles
 
-def getRectangleContours(pillowImg):
+i = 0
+def getSquareContours(pillowImg):
     '''
     find all the squares in the uploaded image, then
     crop each of them with an offset and save to an array
@@ -207,6 +208,8 @@ def getRectangleContours(pillowImg):
 
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+
+
     # Only allow contours with 4 edges (rectangle)
     recContours = []
     for contour in contours:
@@ -214,10 +217,19 @@ def getRectangleContours(pillowImg):
         approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
         if len(approx) == 4:
-            recContours.append(approx)
+            (_,_), (w, h), _ = cv2.minAreaRect(contour)
+            ratio = max(w, h) / min(w, h)
+
+            if ratio < 100:
+                recContours.append(approx)
+
+    # DEBUG
+    global i
+    cv2.drawContours(img, recContours, -1, (0, 255, 0), 3)
+    cv2.imwrite(f"contourstest/{i}.png", img)
+    i += 1
 
     return recContours
-
 
 
 if __name__ == "__main__":
