@@ -65,8 +65,6 @@ def main():
                     FENs.append(fen)
                     actualPuzzles.append(puzzle)
 
-                    # chessBoardVis(fen, puzzle)
-
             # enforce specific number of puzzles per page, if applicable
             if (PUZZLES_PER_PAGE > 0) and (len(FENs) != PUZZLES_PER_PAGE):
                 continue
@@ -91,8 +89,8 @@ def main():
             #     page_num, 
             #     str(pdf_file_name))
     
+    # Create all the PDFs at once after all puzzle pages have been loaded and inferenced
     page_num = 1
-
     while page_num * 6 <= len(allFEN):
         pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
 
@@ -104,12 +102,8 @@ def main():
             str(pdf_file_name))
         page_num += 1
 
-        # plt.show()
-
 def findTemplate(gray_image, template):
     best_confidence = 0
-    best_location = None
-    best_scale = None
 
     for scale in np.arange(0.5, 1.1, 0.05):
         resized = cv2.resize(
@@ -120,31 +114,21 @@ def findTemplate(gray_image, template):
             interpolation=cv2.INTER_AREA
         )
 
-        # Template must be smaller than source image
-        if (
-            resized.shape[0] > gray_image.shape[0]
-            or resized.shape[1] > gray_image.shape[1]
-        ):
-            continue
-
         result = cv2.matchTemplate(
             gray_image,
             resized,
             cv2.TM_CCOEFF_NORMED
         )
 
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
 
         if max_val > best_confidence:
             best_confidence = max_val
-            best_location = max_loc
-            best_scale = scale
 
-    return best_confidence, best_location, best_scale
+    return best_confidence
 
 def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
     for index, puzzle in enumerate(puzzles):
-        puzzle["img"].save(f"{index}.png")
         # Convert to numpy array for cv2
         img = np.array(puzzle["img"])
         # 1. Load the main puzzle image and convert it to grayscale
@@ -161,9 +145,7 @@ def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
 
         threshold = 0.80
 
-        confidence, _, _ = findTemplate(gray_image, template)
-
-        print(f'highest match confidence: {confidence}')
+        confidence = findTemplate(gray_image, template)
 
         # 6. Evaluate the result
         if confidence >= threshold:
@@ -236,22 +218,6 @@ def getRectangleContours(pillowImg):
 
     return recContours
 
-# Show the original board crop alongside the inferred board position
-def chessBoardVis(fen: str, originalBd):
-    if len(fen) <= 5: 
-        return
-    board = chess.Board(fen)
-    svg_string = chess.svg.board(board, size=400)
-    svg2png(bytestring=svg_string, write_to='chessboard.png')
-
-    inferredBd = Image.open('chessboard.png')
-
-    plt.figure(figsize=(6,3))
-    plt.subplot(121)
-    plt.imshow(originalBd)
-    plt.subplot(122)
-    plt.imshow(inferredBd)
-    plt.title(f'{fen.split(" ")[1]} to move')
 
 
 if __name__ == "__main__":
