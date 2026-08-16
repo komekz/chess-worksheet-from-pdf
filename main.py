@@ -9,8 +9,6 @@ import json
 from tqdm import tqdm
 from pathlib import Path
 import argparse
-from typing import TypedDict
-
 from fetch_pdf import create_worksheet_pdf
 from chess_pdf import ChessPDF
 
@@ -31,6 +29,8 @@ parser = argparse.ArgumentParser(description='''
 parser.add_argument("input_pdf", help="the PDF to turn into worksheets")
 parser.add_argument("--name", "-n", required=True, help="name of the output worksheets")
 parser.add_argument("--empty-pages", "-e", default=0, type=int, help="number of un-numbered pages at the start of the pdf (used for correct page numbering)")
+parser.add_argument("--puzzles-per-page", "-p", default=-1, type=int, help="number of puzzles per page if it is the same across all pages. leave blank for variable puzzles per page")
+parser.add_argument("--template", "-t", required=True, choices=["triangle", "text"], help="select the indicator for side to play.")
 
 args = parser.parse_args()
 
@@ -43,9 +43,12 @@ def main():
         raise ValueError(f"{RED}excepts a .pdf file, received: {PDF_PATH.suffix}{RESET}")
     PUZZLE_NAME = args.name
     EMPTY_PAGES = args.empty_pages
+    PUZZLES_PER_PAGE = args.puzzles_per_page
 
     RESULT_DIR = Path(f'result/{PUZZLE_NAME}')
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
+
+    allFEN = []
 
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, EMPTY_PAGES) as chessPDF:
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
@@ -64,33 +67,84 @@ def main():
 
                     # chessBoardVis(fen, puzzle)
 
-            # There must be exactly 6 puzzles to print a worksheet
-            if len(FENs) != 6:
+            # enforce specific number of puzzles per page, if applicable
+            if (PUZZLES_PER_PAGE > 0) and (len(FENs) != PUZZLES_PER_PAGE):
                 continue
 
             # Sort by x position
-            i = 0
-            while i < len(actualPuzzles):
-                curX = actualPuzzles[i]["x"]
-                nextX = actualPuzzles[i+1]["x"]
-                if (curX > nextX):
-                    FENs[i], FENs[i+1] = FENs[i+1], FENs[i]
-                    actualPuzzles[i], actualPuzzles[i+1] = actualPuzzles[i+1], actualPuzzles[i]
-                i += 2
+            # i = 0
+            # while i < len(actualPuzzles):
+            #     curX = actualPuzzles[i]["x"]
+            #     nextX = actualPuzzles[i+1]["x"]
+            #     if (curX > nextX):
+            #         FENs[i], FENs[i+1] = FENs[i+1], FENs[i]
+            #         actualPuzzles[i], actualPuzzles[i+1] = actualPuzzles[i+1], actualPuzzles[i]
+            #     i += 2
 
             # Set side to play based on indicator
             FENs = setSideToPlay(actualPuzzles, FENs)
+            allFEN.extend(FENs)
 
-            pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
-            create_worksheet_pdf(
-                json.dumps(FENs), 
-                page_num, 
-                str(pdf_file_name))
+            # pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
+            # create_worksheet_pdf(
+            #     json.dumps(FENs), 
+            #     page_num, 
+            #     str(pdf_file_name))
+    
+    page_num = 1
+
+    while page_num * 6 <= len(allFEN):
+        pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
+
+        start = (page_num - 1) * 6
+        end = page_num * 6
+        create_worksheet_pdf(
+            json.dumps(allFEN[start:end]), 
+            page_num, 
+            str(pdf_file_name))
+        page_num += 1
 
         # plt.show()
 
+def findTemplate(gray_image, template):
+    best_confidence = 0
+    best_location = None
+    best_scale = None
+
+    for scale in np.arange(0.5, 1.1, 0.05):
+        resized = cv2.resize(
+            template,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA
+        )
+
+        # Template must be smaller than source image
+        if (
+            resized.shape[0] > gray_image.shape[0]
+            or resized.shape[1] > gray_image.shape[1]
+        ):
+            continue
+
+        result = cv2.matchTemplate(
+            gray_image,
+            resized,
+            cv2.TM_CCOEFF_NORMED
+        )
+
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        if max_val > best_confidence:
+            best_confidence = max_val
+            best_location = max_loc
+            best_scale = scale
+
+    return best_confidence, best_location, best_scale
+
 def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
     for index, puzzle in enumerate(puzzles):
+        puzzle["img"].save(f"{index}.png")
         # Convert to numpy array for cv2
         img = np.array(puzzle["img"])
         # 1. Load the main puzzle image and convert it to grayscale
@@ -98,23 +152,21 @@ def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
         gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # 2. Load your cropped black triangle template in grayscale
-        template = cv2.imread('black_triangle_template.png', 0)
-        assert template is not None
+        triangle_template = cv2.imread('templates/black_triangle_template.png', 0)
+        text_template = cv2.imread('templates/black_to_move_text.png', 0)
+        assert triangle_template is not None
+        assert text_template is not None
 
-        w, h = template.shape[::-1]
+        template = triangle_template if args.template == "triangle" else text_template
 
-        # 3. Perform template matching using Normalized Correlation Coefficient
-        # This method normalizes the match confidence from 0.0 (no match) to 1.0 (perfect match)
-        result = cv2.matchTemplate(gray_image, template, cv2.TM_CCOEFF_NORMED)
-
-        # 4. Set your minimum confidence threshold
         threshold = 0.80
 
-        # 5. Get the highest confidence match in the image
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        confidence, _, _ = findTemplate(gray_image, template)
+
+        print(f'highest match confidence: {confidence}')
 
         # 6. Evaluate the result
-        if max_val >= threshold:
+        if confidence >= threshold:
             fenList = FENs[index].split(" ")
             fenList[1] = 'b'
             FENs[index] = ' '.join(fenList)
@@ -137,7 +189,7 @@ def cropPuzzles(recContours, pillowImg) -> list:
         max_w, max_h = pillowImg.size
 
         # Give each crop edge some offset, capped at the image borders
-        clearance = 15
+        clearance = 20
         left = max(0, np.min(contour[:,:, 0]) - clearance)
         right = min(max_w, np.max(contour[:,:, 0]) + clearance)
         top = max(0, np.min(contour[:,:, 1]) - clearance)

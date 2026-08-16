@@ -21,3 +21,8 @@ chess_fen_lib/models/
 
 # PDFs
 *.zip
+*.pdf
+*.png
+
+# include templates
+!templates/*.png
