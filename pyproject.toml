@@ -20,6 +20,7 @@ dependencies = [
     "pymupdf>=1.28.0",
     "argparse>=1.4.0",
     "git-filter-repo>=2.47.0",
+    "easyocr>=1.7.2",
 ]
 
 [project.optional-dependencies]

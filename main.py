@@ -2,13 +2,11 @@ import sys
 import matplotlib.pyplot as plt
 import cv2
 import numpy as np
-import chess
-import chess.svg
-from cairosvg import svg2png
 import json
 from tqdm import tqdm
 from pathlib import Path
 import argparse
+import easyocr
 from fetch_pdf import create_worksheet_pdf
 from chess_pdf import ChessPDF
 
@@ -50,6 +48,7 @@ def main():
 
     allFEN = []
 
+    puzzle_page_num = 1
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, EMPTY_PAGES) as chessPDF:
         for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
             recContours = getSquareContours(png)
@@ -82,50 +81,21 @@ def main():
             # Set side to play based on indicator
             FENs = setSideToPlay(actualPuzzles, FENs)
             allFEN.extend(FENs)
-
-            # pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
-            # create_worksheet_pdf(
-            #     json.dumps(FENs), 
-            #     page_num, 
-            #     str(pdf_file_name))
     
-    # Create all the PDFs at once after all puzzle pages have been loaded and inferenced
-    page_num = 1
-    while page_num * 6 <= len(allFEN):
-        pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num}.pdf'
+            # Create as many pages as it can
+            while len(allFEN) >= 6:
+                pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{puzzle_page_num}.pdf'
 
-        start = (page_num - 1) * 6
-        end = page_num * 6
-        create_worksheet_pdf(
-            json.dumps(allFEN[start:end]), 
-            page_num, 
-            str(pdf_file_name))
-        page_num += 1
+                create_worksheet_pdf(json.dumps(allFEN[0:6]), page_num, str(pdf_file_name))
 
-def findTemplate(gray_image, template):
-    best_confidence = 0
+                del allFEN[0:6]
+                puzzle_page_num += 1
 
-    for scale in np.arange(0.5, 1.1, 0.05):
-        resized = cv2.resize(
-            template,
-            None,
-            fx=scale,
-            fy=scale,
-            interpolation=cv2.INTER_AREA
-        )
+def blackToPlayFEN(fen: str) -> str:
+    fenList = fen.split(" ")
+    fenList[1] = 'b'
 
-        result = cv2.matchTemplate(
-            gray_image,
-            resized,
-            cv2.TM_CCOEFF_NORMED
-        )
-
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-
-        if max_val > best_confidence:
-            best_confidence = max_val
-
-    return best_confidence
+    return ' '.join(fenList)
 
 def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
     for index, puzzle in enumerate(puzzles):
@@ -135,27 +105,24 @@ def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
         # (Ideally, pass just the cropped bottom-right corner of the board to make this lightning fast)
         gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # 2. Load your cropped black triangle template in grayscale
-        triangle_template = cv2.imread('templates/black_triangle_template.png', 0)
-        text_template = cv2.imread('templates/black_to_move_text.png', 0)
-        assert triangle_template is not None
-        assert text_template is not None
-
-        template = triangle_template if args.template == "triangle" else text_template
-
-        threshold = 0.80
-
-        confidence = findTemplate(gray_image, template)
-
-        # 6. Evaluate the result
-        if confidence >= threshold:
-            fenList = FENs[index].split(" ")
-            fenList[1] = 'b'
-            FENs[index] = ' '.join(fenList)
-
-    return FENs
+        if args.template == 'text':
+            if containsBlackText(gray_image):
+                FENs[index] = blackToPlayFEN(FENs[index])
+        # elif args.template == 'triangle':
             
+    return FENs
 
+reader = easyocr.Reader(['ch_sim','en'])
+BLACK_STRINGS = ['黑', 'black']
+def containsBlackText(img) -> bool:
+    results = reader.readtext(img, detail=0)
+
+    for string in results:
+        if any(sub in string for sub in BLACK_STRINGS):
+            return True
+
+    return False
+            
 def cropPuzzles(recContours, pillowImg) -> list:
     '''
     for each rectangle, crop an area from the original image 
@@ -170,7 +137,7 @@ def cropPuzzles(recContours, pillowImg) -> list:
     for contour in recContours:
         max_w, max_h = pillowImg.size
 
-        # Give each crop edge some offset, capped at the image borders
+        # Give each crop edge some offset so the model has some room. capped at the image borders
         clearance = 25
         left = max(0, np.min(contour[:,:, 0]) - clearance)
         right = min(max_w, np.max(contour[:,:, 0]) + clearance)
@@ -206,26 +173,32 @@ def getSquareContours(pillowImg):
     # detect all the edges and turn image into binary for findContours
     edges = cv2.Canny(imgGray, 50, 150)
 
+    kernel = np.ones((3, 3))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
 
-
-    # Only allow contours with 4 edges (rectangle)
+    # filter contours in terms of their size and how square-like they are
     recContours = []
     for contour in contours:
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+        area = cv2.contourArea(contour)
+        if area < 20000: continue
 
-        if len(approx) == 4:
-            (_,_), (w, h), _ = cv2.minAreaRect(contour)
-            ratio = max(w, h) / min(w, h)
+        x, y, w, h= cv2.boundingRect(contour)
+        ratio = w / h
 
-            if ratio < 100:
-                recContours.append(approx)
+        if 0.8 < ratio < 1.2:
+            recContours.append(contour)
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect)
+            box = box.astype(np.int32)
+
+            # DEBUG
+            cv2.drawContours(img, [box], 0, (0, 255, 0), 2)
 
     # DEBUG
     global i
-    cv2.drawContours(img, recContours, -1, (0, 255, 0), 3)
     cv2.imwrite(f"contourstest/{i}.png", img)
     i += 1
 
