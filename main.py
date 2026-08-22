@@ -16,7 +16,7 @@ LIB_DIR = ROOT_DIR / "chess_fen_lib"
 sys.path.insert(0, str(LIB_DIR))
 
 from chess_fen_lib.chess_diagram_to_fen import get_fen
-from PIL import Image
+from PIL import Image, ImageDraw
 
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -29,6 +29,7 @@ parser.add_argument("--name", "-n", required=True, help="name of the output work
 parser.add_argument("--empty-pages", "-e", default=0, type=int, help="number of un-numbered pages at the start of the pdf (used for correct page numbering)")
 parser.add_argument("--puzzles-per-page", "-p", default=-1, type=int, help="number of puzzles per page if it is the same across all pages. leave blank for variable puzzles per page")
 parser.add_argument("--template", "-t", required=True, choices=["triangle", "text"], help="select the indicator for side to play.")
+parser.add_argument("--use-original-pagenum", "-o", action='store_true')
 
 args = parser.parse_args()
 
@@ -42,15 +43,16 @@ def main():
     PUZZLE_NAME = args.name
     EMPTY_PAGES = args.empty_pages
     PUZZLES_PER_PAGE = args.puzzles_per_page
+    USE_ORIGINAL_PAGE_NUM = args.use_original_pagenum
 
     RESULT_DIR = Path(f'result/{PUZZLE_NAME}')
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
     allFEN = []
 
-    puzzle_page_num = 1
+    page_num = 1
     with ChessPDF(str(PDF_PATH), PUZZLE_NAME, EMPTY_PAGES) as chessPDF:
-        for png, page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
+        for png, original_page_num in tqdm(chessPDF, desc="Processing PDF Pages"):
             recContours = getSquareContours(png)
             cutPuzzles = cropPuzzles(recContours, png)
 
@@ -68,28 +70,31 @@ def main():
             if (PUZZLES_PER_PAGE > 0) and (len(FENs) != PUZZLES_PER_PAGE):
                 continue
 
-            # Sort by x position
-            # i = 0
-            # while i < len(actualPuzzles):
-            #     curX = actualPuzzles[i]["x"]
-            #     nextX = actualPuzzles[i+1]["x"]
-            #     if (curX > nextX):
-            #         FENs[i], FENs[i+1] = FENs[i+1], FENs[i]
-            #         actualPuzzles[i], actualPuzzles[i+1] = actualPuzzles[i+1], actualPuzzles[i]
-            #     i += 2
+            # Sort by x position (only works for pages with exatly 6 puzzles)
+            if PUZZLES_PER_PAGE == 6:
+                i = 0
+                while i < len(actualPuzzles):
+                    curX = actualPuzzles[i]["x"]
+                    nextX = actualPuzzles[i+1]["x"]
+                    if (curX > nextX):
+                        FENs[i], FENs[i+1] = FENs[i+1], FENs[i]
+                        actualPuzzles[i], actualPuzzles[i+1] = actualPuzzles[i+1], actualPuzzles[i]
+                    i += 2
 
             # Set side to play based on indicator
             FENs = setSideToPlay(actualPuzzles, FENs)
             allFEN.extend(FENs)
-    
+
+            page_num_to_use = original_page_num if USE_ORIGINAL_PAGE_NUM else page_num
+
             # Create as many pages as it can
             while len(allFEN) >= 6:
-                pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{puzzle_page_num}.pdf'
+                pdf_file_name = RESULT_DIR / f'{PUZZLE_NAME}-{page_num_to_use}.pdf'
 
-                create_worksheet_pdf(json.dumps(allFEN[0:6]), page_num, str(pdf_file_name))
+                create_worksheet_pdf(json.dumps(allFEN[0:6]), page_num_to_use, str(pdf_file_name))
 
                 del allFEN[0:6]
-                puzzle_page_num += 1
+                page_num += 1
 
 def blackToPlayFEN(fen: str) -> str:
     fenList = fen.split(" ")
@@ -102,26 +107,61 @@ def setSideToPlay(puzzles: list[dict], FENs: list[str]) -> list:
         # Convert to numpy array for cv2
         img = np.array(puzzle["img"])
         # 1. Load the main puzzle image and convert it to grayscale
-        # (Ideally, pass just the cropped bottom-right corner of the board to make this lightning fast)
         gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        noboard = np.array(puzzle["noboard"])
+        gray_noboard = cv2.cvtColor(noboard, cv2.COLOR_BGR2GRAY)
 
         if args.template == 'text':
             if containsBlackText(gray_image):
                 FENs[index] = blackToPlayFEN(FENs[index])
-        # elif args.template == 'triangle':
+        elif args.template == 'triangle':
+            if containsBlackTriangle(gray_noboard):
+                FENs[index] = blackToPlayFEN(FENs[index])
             
     return FENs
 
 reader = easyocr.Reader(['ch_sim','en'])
-BLACK_STRINGS = ['黑', 'black']
+BLACK_STRINGS = ['黑', 'black', 'Black']
 def containsBlackText(img) -> bool:
     results = reader.readtext(img, detail=0)
+
+    print(results)
 
     for string in results:
         if any(sub in string for sub in BLACK_STRINGS):
             return True
 
     return False
+
+def containsBlackTriangle(img) -> bool:
+    blurred = cv2.GaussianBlur(img, (3, 3), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    approx_kept = []
+    largest_area = 0
+    for contour in contours:
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.05 * peri, True)
+
+        area = cv2.contourArea(contour)
+        if len(approx) == 3 and area > largest_area:
+            approx_kept = approx
+            largest_area = area
+
+    mask = img.copy()
+    mask.fill(0)
+
+    cv2.fillPoly(mask, [approx_kept], 255)
+
+    mean_brightness = np.mean(img[mask > 0])
+
+    if mean_brightness < 150:
+        return True
+    else:
+        return False
             
 def cropPuzzles(recContours, pillowImg) -> list:
     '''
@@ -137,18 +177,29 @@ def cropPuzzles(recContours, pillowImg) -> list:
     for contour in recContours:
         max_w, max_h = pillowImg.size
 
-        # Give each crop edge some offset so the model has some room. capped at the image borders
-        clearance = 25
-        left = max(0, np.min(contour[:,:, 0]) - clearance)
-        right = min(max_w, np.max(contour[:,:, 0]) + clearance)
-        top = max(0, np.min(contour[:,:, 1]) - clearance)
-        bottom = min(max_h, np.max(contour[:,:, 1]) + clearance + 25)
+        left = np.min(contour[:,:, 0])
+        right = np.max(contour[:,:, 0])
+        top = np.min(contour[:,:, 1])
+        bottom = np.max(contour[:,:, 1])
 
-        cropPuzzle = pillowImg.crop((left, top, right, bottom))
+        # Give each crop edge some offset so the model has some room. capped at the image borders
+        clearance = 50
+        cleared_left = max(0, left - clearance)
+        cleared_right = min(max_w, right + clearance)
+        cleared_top = max(0, top - clearance)
+        cleared_bottom = min(max_h, bottom + clearance)
+
+        cropPuzzle = pillowImg.crop((cleared_left, cleared_top, cleared_right, cleared_bottom))
+        noboard = cropPuzzle.copy()
+
+        draw = ImageDraw.Draw(noboard)
+        draw.rectangle((left - cleared_left, top - cleared_top, right - cleared_left, bottom - cleared_top), fill="black")
+
         cutPuzzles.append({
             "img": cropPuzzle, 
             "x": left, 
-            "y": top
+            "y": top,
+            "noboard": noboard
         })
 
     # sorted by y position, puzzles at the top of the page starts first
@@ -194,13 +245,6 @@ def getSquareContours(pillowImg):
             box = cv2.boxPoints(rect)
             box = box.astype(np.int32)
 
-            # DEBUG
-            cv2.drawContours(img, [box], 0, (0, 255, 0), 2)
-
-    # DEBUG
-    global i
-    cv2.imwrite(f"contourstest/{i}.png", img)
-    i += 1
 
     return recContours
 
